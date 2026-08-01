@@ -1,0 +1,31 @@
+# Python
+server/venv/
+server/__pycache__/
+server/*.pyc
+server/.env
+
+# Node
+client/node_modules/
+client/.next/
+client/.env
+client/.env.local
+
+# OS
+.DS_Store
+
+# Frontend
+client/node_modules/
+client/.next/
+
+# Backend
+server/.venv/
+server/__pycache__/
+server/.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
