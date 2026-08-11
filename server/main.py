@@ -245,13 +245,22 @@ def run_research_loop(user_question: str, history: list[dict]):
         elif tool_call.function.name == "search":
             query = args.get("query", user_question)
             results = search_web(query)
-            context = format_search_context(results)
-
             start_index = len(all_sources) + 1
+
+            context = format_search_context(
+                results,
+                start_index=start_index
+            )
+
             sources = [
-                {"index": start_index + i, "title": r["title"], "url": r["url"]}
+                {
+                    "index": start_index + i,
+                    "title": r["title"],
+                    "url": r["url"]
+                }
                 for i, r in enumerate(results)
             ]
+
             all_sources.extend(sources)
             all_observations.append({"query": query, "context": context})
 
@@ -271,17 +280,22 @@ def search_web(query: str, max_results: int = 5) -> list[dict]:
     print("\n\n\n\n\n\n\n")
     return response["results"]  # each has: title, url, content, score
 
-# def format_search_context(results: list[dict]) -> str:
-#     blocks = []
-#     for i, r in enumerate(results, start=1):
-#         blocks.append(f"[{i}] {r['title']}\nURL: {r['url']}\n{r['content']}")
-#     return "\n\n".join(blocks)
-
-def format_search_context(results: list[dict], max_chars_per_result: int = 500) -> str:
+def format_search_context(
+    results: list[dict],
+    start_index: int = 1,
+    max_chars_per_result: int = 500
+):
     blocks = []
-    for i, r in enumerate(results, start=1):
-        content = r['content'][:max_chars_per_result]
-        blocks.append(f"[{i}] {r['title']}\nURL: {r['url']}\n{content}")
+
+    for i, r in enumerate(results, start=start_index):
+        content = r["content"][:max_chars_per_result]
+
+        blocks.append(
+            f"[{i}] {r['title']}\n"
+            f"URL: {r['url']}\n"
+            f"{content}"
+        )
+
     return "\n\n".join(blocks)
 
 
