@@ -1,5 +1,4 @@
 import os
-import uuid
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -7,7 +6,6 @@ from openai import BadRequestError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from db import Base, engine
-import models
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
@@ -22,6 +20,8 @@ import json
 from providers import get_client, get_default_model, DEFAULT_PROVIDER
 
 load_dotenv()
+
+from rate_limit import check_rate_limit
 
 app = FastAPI()
 
@@ -333,7 +333,8 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/chat")
-def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)   ):
+def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    check_rate_limit(user_id)
     if request.conversation_id:
         conversation = db.query(Conversation).filter(
             Conversation.id == request.conversation_id,
