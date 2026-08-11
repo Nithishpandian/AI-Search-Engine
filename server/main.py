@@ -3,7 +3,7 @@ import uuid
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
-from openai import OpenAI, BadRequestError
+from openai import BadRequestError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from db import Base, engine
@@ -19,6 +19,7 @@ from auth import decode_access_token
 import os
 from tavily import TavilyClient
 import json
+from providers import get_client, get_default_model, DEFAULT_PROVIDER
 
 load_dotenv()
 
@@ -27,11 +28,6 @@ app = FastAPI()
 Base.metadata.create_all(bind=engine)
 
 tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
-client = OpenAI(
-    api_key=os.environ["GROQ_API_KEY"],
-    base_url="https://api.groq.com/openai/v1",
-)
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,10 +38,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# In-memory store: { conversation_id: [ {role, content}, ... ] }
-conversations: dict[str, list[dict]] = {}
 
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -58,6 +50,7 @@ class LoginRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
+    provider: str = DEFAULT_PROVIDER
 
 routing_tools = [
     {
@@ -122,7 +115,10 @@ research_tools = [
 ]
 
 
-def decide_approach(history: list[dict], user_message: str) -> dict:
+def decide_approach(history: list[dict], user_message: str, provider: str = DEFAULT_PROVIDER) -> dict:
+    client = get_client(provider)
+    model = get_default_model(provider)
+
     routing_messages = [
         {
             "role": "system",
@@ -136,7 +132,7 @@ def decide_approach(history: list[dict], user_message: str) -> dict:
 
     try:
         response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model=model,
             messages=routing_messages,
             tools=routing_tools,
             tool_choice={"type": "function", "function": {"name": "decide_approach"}},
@@ -173,7 +169,7 @@ def decide_approach(history: list[dict], user_message: str) -> dict:
         print(f"Routing decision failed, defaulting to single_search: {e}")
         return {"mode": "single_search", "search_query": user_message}
 
-def run_research_loop(user_question: str, history: list[dict]):
+def run_research_loop(user_question: str, history: list[dict], provider: str = DEFAULT_PROVIDER):
     """
     Runs a ReAct-style loop. Yields (event_type, data) tuples for streaming,
     and returns (all_sources, all_observations) when done.
@@ -204,11 +200,13 @@ def run_research_loop(user_question: str, history: list[dict]):
 
     all_sources = []
     all_observations = []
+    client = get_client(provider)
+    model = get_default_model(provider)
 
     for step in range(MAX_RESEARCH_STEPS):
         try:
             response = client.chat.completions.create(
-                model="openai/gpt-oss-120b",
+                model=model,
                 messages=scratchpad,
                 tools=research_tools,
                 tool_choice="auto",
@@ -335,7 +333,7 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/chat")
-def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)   ):
     if request.conversation_id:
         conversation = db.query(Conversation).filter(
             Conversation.id == request.conversation_id,
@@ -355,7 +353,7 @@ def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: 
 
     history = [{"role": m.role, "content": m.content} for m in conversation.messages]
 
-    routing = decide_approach(history[:-1], request.message)  # returns {"mode": ..., "search_query": ...}
+    routing = decide_approach(history[:-1], request.message, provider=request.provider)
 
     sources = []
     system_prompt = "You are a helpful assistant."
@@ -364,7 +362,8 @@ def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: 
         nonlocal sources, system_prompt
 
         if routing["mode"] == "research":
-            gen = run_research_loop(request.message, history[:-1])
+            gen = run_research_loop(request.message, history[:-1], provider=request.provider)
+
             try:
                 while True:
                     event_type, data = next(gen)
@@ -395,8 +394,10 @@ def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: 
         messages_for_model = [{"role": "system", "content": system_prompt}] + history
 
         full_reply = ""
+        client = get_client(request.provider)
+        model = get_default_model(request.provider)
         stream = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model=model,
             messages=messages_for_model,
             stream=True,
         )
