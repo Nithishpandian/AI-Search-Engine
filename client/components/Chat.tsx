@@ -9,17 +9,23 @@ type Source = {
   url: string;
 };
 
+type ResearchStep = {
+  step: number;
+  query: string;
+};
+
 type Message = {
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
+  researchSteps?: ResearchStep[];
 };
 
 function SendIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
       <path
-        d="M22 2L11 13M22 2L15 22l-4-9-9-4 20-7z"
+        d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"
         stroke="currentColor"
         strokeWidth="2"
         strokeLinecap="round"
@@ -41,15 +47,15 @@ function SpinnerIcon() {
       <circle
         cx="12"
         cy="12"
-        r="10"
+        r="9"
         stroke="currentColor"
-        strokeWidth="3"
+        strokeWidth="2"
         strokeOpacity="0.25"
       />
       <path
-        d="M12 2a10 10 0 0 1 10 10"
+        d="M21 12a9 9 0 0 0-9-9"
         stroke="currentColor"
-        strokeWidth="3"
+        strokeWidth="2"
         strokeLinecap="round"
       />
     </svg>
@@ -58,11 +64,23 @@ function SpinnerIcon() {
 
 function TypingDots() {
   return (
-    <span className="typing-indicator">
-      <span className="typing-dot" />
-      <span className="typing-dot" />
-      <span className="typing-dot" />
+    <span className="typing-dots">
+      <span></span>
+      <span></span>
+      <span></span>
     </span>
+  );
+}
+
+function ResearchStatus({ steps }: { steps: ResearchStep[] }) {
+  const latest = steps[steps.length - 1];
+  return (
+    <div className="research-status">
+      <SpinnerIcon />
+      <span className="research-status-text">
+        Researching — step {latest.step}: “{latest.query}”
+      </span>
+    </div>
   );
 }
 
@@ -78,10 +96,7 @@ export default function Chat() {
 
     const userMessage = input;
 
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", content: userMessage },
-    ]);
+    setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
 
     setInput("");
     setLoading(true);
@@ -89,7 +104,7 @@ export default function Chat() {
     // Placeholder assistant message
     setMessages((prev) => [
       ...prev,
-      { role: "assistant", content: "", sources: [] },
+      { role: "assistant", content: "", sources: [], researchSteps: [] },
     ]);
 
     const response = await fetch("http://localhost:8000/chat", {
@@ -106,11 +121,15 @@ export default function Chat() {
 
     if (response.status === 401) {
       logout();
+      setLoading(false);
       return;
     }
 
     const reader = response.body?.getReader();
-    if (!reader) return;
+    if (!reader) {
+      setLoading(false);
+      return;
+    }
 
     const decoder = new TextDecoder();
     let assistantText = "";
@@ -128,9 +147,12 @@ export default function Chat() {
       buffer = events.pop() ?? "";
 
       for (const event of events) {
+        if (!event.trim()) continue;
+
         const lines = event.split("\n");
 
-        // Determine named event type, if any (e.g. "sources", "done")
+        // Determine named event type, if any
+        // (e.g. "research_step", "sources", "done")
         const eventTypeLine = lines.find((l) => l.startsWith("event: "));
         const eventType = eventTypeLine
           ? eventTypeLine.slice("event: ".length).trim()
@@ -142,7 +164,22 @@ export default function Chat() {
           .map((l) => l.slice("data: ".length))
           .join("\n");
 
-        if (eventType === "sources") {
+        if (eventType === "research_step") {
+          try {
+            const step: ResearchStep = JSON.parse(dataPayload);
+            setMessages((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              copy[copy.length - 1] = {
+                ...last,
+                researchSteps: [...(last.researchSteps ?? []), step],
+              };
+              return copy;
+            });
+          } catch {
+            // ignore malformed payload
+          }
+        } else if (eventType === "sources") {
           try {
             const sources: Source[] = JSON.parse(dataPayload);
             setMessages((prev) => {
@@ -178,26 +215,12 @@ export default function Chat() {
   }
 
   return (
-    <div className="chat-root">
+    <div className="chat-container">
       {/* ── Header ── */}
       <header className="chat-header">
-        <div className="chat-header-left">
-          <div className="chat-logo-box">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </div>
-          <span className="chat-title">AI Assistant</span>
-          <div className="chat-status">
-            <span className="status-dot" />
-            <span className="status-label">online</span>
-          </div>
+        <div className="chat-header-info">
+          <span className="chat-header-title">AI Assistant</span>
+          <span className="chat-header-status">online</span>
         </div>
 
         <button
@@ -239,40 +262,55 @@ export default function Chat() {
           </div>
         )}
 
-        {messages.map((msg, index) => (
-          <div
-            key={index}
-            className={`msg-row msg-row--${msg.role}`}
-          >
-            <div className={`msg-bubble msg-bubble--${msg.role}`}>
-              {/* Content or typing indicator */}
-              {msg.content || <TypingDots />}
+        {messages.map((msg, index) => {
+          const isStreamingAssistant =
+            msg.role === "assistant" &&
+            !msg.content &&
+            index === messages.length - 1;
 
-              {/* Sources — only for assistant */}
-              {msg.role === "assistant" &&
-                msg.sources &&
-                msg.sources.length > 0 && (
-                  <div className="sources-section">
-                    <p className="sources-heading">Sources</p>
-                    <div className="sources-list">
-                      {msg.sources.map((source) => (
-                        <a
-                          key={source.index}
-                          href={source.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="source-link"
-                        >
-                          <span className="source-num">[{source.index}]</span>
-                          {source.title}
-                        </a>
-                      ))}
-                    </div>
-                  </div>
+          const showResearchStatus =
+            isStreamingAssistant &&
+            msg.researchSteps &&
+            msg.researchSteps.length > 0;
+
+          return (
+            <div key={index} className={`msg-row msg-row--${msg.role}`}>
+              <div className={`msg-bubble msg-bubble--${msg.role}`}>
+                {/* Content, research status, or typing indicator */}
+                {msg.content ? (
+                  msg.content
+                ) : showResearchStatus ? (
+                  <ResearchStatus steps={msg.researchSteps!} />
+                ) : (
+                  <TypingDots />
                 )}
+
+                {/* Sources — only for assistant */}
+                {msg.role === "assistant" &&
+                  msg.sources &&
+                  msg.sources.length > 0 && (
+                    <div className="sources-section">
+                      <p className="sources-heading">Sources</p>
+                      <div className="sources-list">
+                        {msg.sources.map((source) => (
+                          <a
+                            key={source.index}
+                            href={source.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="source-link"
+                          >
+                            <span className="source-num">[{source.index}]</span>
+                            {source.title}
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* ── Input bar ── */}

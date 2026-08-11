@@ -541,7 +541,7 @@ body {
 }
 
 .chat-input-bar {
-  padding: 0.85rem 1rem;
+  padding: 0.85rem 5rem;
   background: var(--surface);
   border-top: 1px solid var(--border);
   display: flex;
