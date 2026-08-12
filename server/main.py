@@ -1,5 +1,4 @@
 import time
-import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -15,11 +14,12 @@ from models import User, Conversation, Message
 from auth import hash_password, verify_password, create_access_token
 from fastapi import Depends, HTTPException, Header
 from auth import decode_access_token
-import os
 import json
 from providers import get_client, get_default_model, DEFAULT_PROVIDER
 from search import search_web
+from logger import setup_logging, logger
 
+setup_logging()
 load_dotenv()
 
 from rate_limit import check_rate_limit
@@ -158,17 +158,17 @@ def decide_approach(history: list[dict], user_message: str, provider: str = DEFA
             failed_generation = None
 
         if failed_generation:
-            print(f"Routing model tried to answer directly ({failed_generation!r}) — treating as mode=direct")
+            logger.warning(f"Routing fallback triggered: model answered directly instead of calling tool. mode=direct")
             return {"mode": "direct", "search_query": ""}
 
-        print(f"Routing decision failed (bad request), defaulting to single_search: {e}")
+        logger.error(f"Routing decision failed (bad request), defaulting to single_search: {e}")
         return {"mode": "single_search", "search_query": user_message}
 
     except Exception as e:
-        print(f"Routing decision failed, defaulting to single_search: {e}")
+        logger.error(f"Routing decision failed, defaulting to single_search: {e}")
         return {"mode": "single_search", "search_query": user_message}
 
-def run_research_loop(user_question: str, history: list[dict], provider: str = DEFAULT_PROVIDER):
+def run_research_loop(user_question: str, history: list[dict], provider: str = DEFAULT_PROVIDER, user_id: str = None):
     """
     Runs a ReAct-style loop. Yields (event_type, data) tuples for streaming,
     and returns (all_sources, all_observations) when done.
@@ -213,16 +213,16 @@ def run_research_loop(user_question: str, history: list[dict], provider: str = D
                 parallel_tool_calls=False
             )
             if response.usage:
-                print(f"Step {step+1} tokens — prompt: {response.usage.prompt_tokens}, completion: {response.usage.completion_tokens}, total: {response.usage.total_tokens}")
-                
+                logger.info(f"Step {step+1} tokens — prompt: {response.usage.prompt_tokens} | completion: {response.usage.completion_tokens} | total: {response.usage.total_tokens}")
+
         except RateLimitError as e:
-            print(f"Rate limit hit at step {step+1}, stopping research early: {e}")
+            logger.error(f"Groq rate limit hit | research_step={step+1} | user={user_id} | error={e}")
             break
         except Exception as e:
-            print(f"Step {step+1} failed after {time.time()-step_start:.2f}s: {e}")
+            logger.error(f"Research step failed | research_step={step+1} | user={user_id} | error={e}")
             break
         
-        print(f"Step {step+1} took {time.time()-step_start:.2f}s")
+        logger.info(f"Step {step+1} completed | user={user_id} | duration={time.time()-step_start:.2f}s")
         message = response.choices[0].message
 
         if not message.tool_calls:
@@ -379,7 +379,10 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
 
 @app.post("/chat")
 def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    request_start = time.time()
+    logger.info(f"Chat request received | user={user_id} | provider={request.provider} | conversation_id={request.conversation_id}")
     check_rate_limit(user_id)
+    
     if request.conversation_id:
         conversation = db.query(Conversation).filter(
             Conversation.id == request.conversation_id,
@@ -400,6 +403,7 @@ def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: 
     history = [{"role": m.role, "content": m.content} for m in conversation.messages]
 
     routing = decide_approach(history[:-1], request.message, provider=request.provider)
+    logger.info(f"Routing decision | user={user_id} | mode={routing['mode']}")
 
     sources = []
     system_prompt = "You are a helpful assistant."
@@ -408,7 +412,7 @@ def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: 
         nonlocal sources, system_prompt
 
         if routing["mode"] == "research":
-            gen = run_research_loop(request.message, history[:-1], provider=request.provider)
+            gen = run_research_loop(request.message, history[:-1], provider=request.provider, user_id=user_id)
 
             try:
                 while True:
@@ -456,6 +460,7 @@ def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id), db: 
         assistant_msg = Message(conversation_id=conversation.id, role="assistant", content=full_reply)
         db.add(assistant_msg)
         db.commit()
+        logger.info(f"Chat request completed | user={user_id} | mode={routing['mode']} | duration={time.time()-request_start:.2f}s")
         yield f"event: done\ndata: {conversation.id}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

@@ -2,6 +2,7 @@ import os
 import time
 import redis
 from fastapi import HTTPException
+from logger import logger
 
 redis_client = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
 
@@ -18,6 +19,7 @@ def check_rate_limit(user_id: str, limit: int = 20, window_seconds: int = 60):
         redis_client.expire(key, window_seconds)
 
     if current > limit:
+        logger.warning(f"Rate limit exceeded | user={user_id} | limit={limit} | window={window_seconds}")
         raise HTTPException(
             status_code=429,
             detail=f"Rate limit exceeded: max {limit} requests per {window_seconds} seconds.",
