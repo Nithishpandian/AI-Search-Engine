@@ -1,8 +1,9 @@
+import time
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
-from openai import BadRequestError
+from openai import BadRequestError, RateLimitError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from db import Base, engine
@@ -15,9 +16,9 @@ from auth import hash_password, verify_password, create_access_token
 from fastapi import Depends, HTTPException, Header
 from auth import decode_access_token
 import os
-from tavily import TavilyClient
 import json
 from providers import get_client, get_default_model, DEFAULT_PROVIDER
+from search import search_web
 
 load_dotenv()
 
@@ -26,8 +27,6 @@ from rate_limit import check_rate_limit
 app = FastAPI()
 
 Base.metadata.create_all(bind=engine)
-
-tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,7 +80,7 @@ routing_tools = [
         },
     }
 ]
-MAX_RESEARCH_STEPS = 5
+MAX_RESEARCH_STEPS = 3
 
 research_tools = [
     {
@@ -204,18 +203,26 @@ def run_research_loop(user_question: str, history: list[dict], provider: str = D
     model = get_default_model(provider)
 
     for step in range(MAX_RESEARCH_STEPS):
+        step_start = time.time()
         try:
             response = client.chat.completions.create(
                 model=model,
-                messages=scratchpad,
+                messages=trim_scratchpad(scratchpad),
                 tools=research_tools,
                 tool_choice="auto",
                 parallel_tool_calls=False
             )
-        except Exception as e:
-            print(e)
+            if response.usage:
+                print(f"Step {step+1} tokens — prompt: {response.usage.prompt_tokens}, completion: {response.usage.completion_tokens}, total: {response.usage.total_tokens}")
+                
+        except RateLimitError as e:
+            print(f"Rate limit hit at step {step+1}, stopping research early: {e}")
             break
-
+        except Exception as e:
+            print(f"Step {step+1} failed after {time.time()-step_start:.2f}s: {e}")
+            break
+        
+        print(f"Step {step+1} took {time.time()-step_start:.2f}s")
         message = response.choices[0].message
 
         if not message.tool_calls:
@@ -245,38 +252,29 @@ def run_research_loop(user_question: str, history: list[dict], provider: str = D
             results = search_web(query)
             start_index = len(all_sources) + 1
 
-            context = format_search_context(
-                results,
-                start_index=start_index
-            )
+            context = format_search_context(results, start_index=start_index)
 
             sources = [
-                {
-                    "index": start_index + i,
-                    "title": r["title"],
-                    "url": r["url"]
-                }
+                {"index": start_index + i, "title": r["title"], "url": r["url"]}
                 for i, r in enumerate(results)
             ]
-
             all_sources.extend(sources)
+
+            # Keep the FULL context for final synthesis...
             all_observations.append({"query": query, "context": context})
+
+            # ...but only feed a COMPRESSED version back into the scratchpad's ongoing reasoning loop.
+            summary = summarize_observation(query, context, provider=provider)
 
             yield ("research_step", {"step": step + 1, "query": query})
 
             scratchpad.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
-                "content": context,
+                "content": summary,
             })
 
     return all_sources, all_observations
-
-def search_web(query: str, max_results: int = 5) -> list[dict]:
-    response = tavily_client.search(query=query, max_results=max_results)
-    print(response["results"])
-    print("\n\n\n\n\n\n\n")
-    return response["results"]  # each has: title, url, content, score
 
 def format_search_context(
     results: list[dict],
@@ -295,6 +293,53 @@ def format_search_context(
         )
 
     return "\n\n".join(blocks)
+
+def trim_scratchpad(scratchpad: list[dict], keep_full_last_n: int = 1, old_max_chars: int = 150) -> list[dict]:
+    """
+    Returns a new scratchpad where all 'tool' role messages except the most
+    recent `keep_full_last_n` are truncated to `old_max_chars`.
+    Does not mutate the original list.
+    """
+    tool_indices = [i for i, m in enumerate(scratchpad) if m["role"] == "tool"]
+    recent_tool_indices = set(tool_indices[-keep_full_last_n:]) if tool_indices else set()
+
+    trimmed = []
+    for i, msg in enumerate(scratchpad):
+        if msg["role"] == "tool" and i not in recent_tool_indices:
+            content = msg["content"]
+            if len(content) > old_max_chars:
+                content = content[:old_max_chars] + "... [truncated, see earlier step]"
+            trimmed.append({**msg, "content": content})
+        else:
+            trimmed.append(msg)
+
+    return trimmed
+
+def summarize_observation(query: str, context: str, provider: str = DEFAULT_PROVIDER) -> str:
+    """
+    Compresses one search observation into a short, fact-dense summary,
+    using a cheap/fast model call — this should be fast and cheap relative
+    to the main research/generation calls, not another expensive round-trip.
+    """
+    client = get_client(provider)
+    model = get_default_model(provider)
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Summarize the following search results into 2-3 dense sentences, "
+                    "preserving all specific numbers, dates, and named facts. "
+                    "Do not add commentary or omit concrete data points."
+                ),
+            },
+            {"role": "user", "content": f"Search query: {query}\n\nResults:\n{context}"},
+        ],
+        max_tokens=150,
+    )
+    return response.choices[0].message.content
 
 
 def get_current_user_id(authorization: str = Header(...)) -> str:

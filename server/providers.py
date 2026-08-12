@@ -19,7 +19,7 @@ PROVIDERS = {
     },
 }
 
-DEFAULT_PROVIDER = "openrouter"
+DEFAULT_PROVIDER = "groq"
 
 _client_cache: dict[str, OpenAI] = {}
 
