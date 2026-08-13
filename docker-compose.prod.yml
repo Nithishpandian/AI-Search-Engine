@@ -8,8 +8,10 @@ services:
   backend:
     build: ./server
     restart: unless-stopped
-    expose:
-      - "8000"    # only reachable by other containers, NOT the public internet
+    # expose:
+    #   - "8000"    # only reachable by other containers, NOT the public internet
+    ports:
+      - "127.0.0.1:8000:8000"
     env_file:
       - ./server/.env
     depends_on:
