@@ -1,4 +1,6 @@
+from logging import config
 import time
+import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -31,7 +33,7 @@ Base.metadata.create_all(bind=engine)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",
+        os.environ.get(config["CLIENT_URL"])
     ],
     allow_credentials=True,
     allow_methods=["*"],
