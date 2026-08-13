@@ -1,3 +1,4 @@
+# search.py
 import json
 import hashlib
 from logger import logger
@@ -14,14 +15,13 @@ def _cache_key(query: str) -> str:
     digest = hashlib.sha256(normalized.encode()).hexdigest()
     return f"search_cache:{digest}"
 
-# search.py
 
 def search_web(query: str, max_results: int = 5) -> list[dict]:
     key = _cache_key(query)
 
     start = time.time()
     cached = redis_client.get(key)
-    
+
     if cached:
         logger.info(f"Cache hit | query={query!r} | latency={time.time()-start:.3f}s")
         return json.loads(cached)

@@ -1,0 +1,19 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data   # persist Redis data across container restarts
+
+  backend:
+    build: ./server
+    restart: unless-stopped
+    expose:
+      - "8000"    # only reachable by other containers, NOT the public internet
+    env_file:
+      - ./server/.env
+    depends_on:
+      - redis
+
+volumes:
+  redis-data:
